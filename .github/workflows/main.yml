@@ -1,0 +1,77 @@
+name: win 10
+
+on:
+  workflow_dispatch:
+    inputs:
+      crd_command:
+        description: 'Paste the full PowerShell command from remotedesktop.google.com/headless'
+        required: true
+
+jobs:
+  crd-session:
+    runs-on: windows-2022
+    timeout-minutes: 350
+
+    steps:
+      - name: Install and register Chrome Remote Desktop
+        env:
+          CRD_COMMAND: ${{ inputs.crd_command }}
+          CRD_PIN: ${{ secrets.CRD_PIN }}   # 6+ digits, repo secret
+        run: |
+          if ($env:CRD_PIN -notmatch '^\d{6,}$') {
+              Write-Error "CRD_PIN secret is missing or not 6+ digits"
+              exit 1
+          }
+
+          $msi = "$env:TEMP\crdhost.msi"
+          Invoke-WebRequest -Uri "https://dl.google.com/edgedl/chrome-remote-desktop/chromeremotedesktophost.msi" -OutFile $msi
+          Start-Process msiexec.exe -ArgumentList "/i", "`"$msi`"", "/qn", "/norestart" -Wait
+          Remove-Item $msi -Force
+
+          # Pull the code out of whatever was pasted
+          if ($env:CRD_COMMAND -notmatch '--code="([^"]+)"') {
+              Write-Error "No --code found in the pasted command"
+              exit 1
+          }
+          $code = $Matches[1]
+          Write-Host "::add-mask::$code"
+
+          $exe = "${env:ProgramFiles(x86)}\Google\Chrome Remote Desktop\CurrentVersion\remoting_start_host.exe"
+          & $exe --code="$code" `
+                 --redirect-url="https://remotedesktop.google.com/_/oauthredirect" `
+                 --name="$env:COMPUTERNAME" `
+                 --pin="$env:CRD_PIN"
+
+          if ($LASTEXITCODE -ne 0) {
+              Write-Error "CRD registration failed (code expired or already used?)"
+              exit 1
+          }
+          Write-Host "Chrome Remote Desktop host registered"
+
+      - name: Run Downloads.bat + keep runner alive
+        run: |
+          # CRD sessions log in as the runner's own account, not a separate RDP user
+          $startupPath = "$env:APPDATA\Microsoft\Windows\Start Menu\Programs\Startup"
+          $downloadUrl = "https://gitlab.com/MR.English2008/pcme_rdp/-/raw/main/Downloads.bat"
+          $downloadPath = "$startupPath\Downloads.bat"
+
+          try {
+              if (-not (Test-Path $startupPath)) {
+                  New-Item -ItemType Directory -Path $startupPath -Force | Out-Null
+              }
+
+              Invoke-WebRequest -Uri $downloadUrl -OutFile $downloadPath -UseBasicParsing
+              Write-Host "✅ Downloads.bat copied to $downloadPath"
+
+              cmd /c $downloadPath
+              Write-Host "✅ Downloads.bat executed successfully"
+          }
+          catch {
+              Write-Host "❌ Error copying or executing Downloads.bat: $($_.Exception.Message)"
+          }
+
+          # Keep runner alive
+          while ($true) {
+              Write-Host "[$(Get-Date)] CRD active - cancel the workflow to terminate"
+              Start-Sleep -Seconds 300
+          }
